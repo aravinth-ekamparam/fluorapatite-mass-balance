@@ -26,7 +26,7 @@ V = 0.058             # Reactor volume (L) [58 mL]
 Q = 0.01 / 1000.0     # Flow rate (L/min) [0.01 mL/min]
 S_calcite_0 = 4.0     # Calcite loading (g/L)
 C_in_F = 0.21 / 1000.0# Influent F concentration (0.21 mM -> M)
-dt = 0.5              # Time step (min)
+dt = 0.5              # Integration time step (min)
 
 t_obs = obs_data["time_min"].values
 F_obs = obs_data["F_obs_M"].values
@@ -79,31 +79,38 @@ def fit_and_update_github():
     k_ad_opt = 10**opt_log_k_ad
     q_max_opt = 10**opt_log_q_max
     
-    pred_F = forward_euler_sim(res.x)
+    # Generate high resolution curves
+    t_fine = np.linspace(0, t_obs[-1], 1000)
+    tracer_fine = 1.0 - np.exp(-t_fine / tR) # Non-reactive tracer solution
     
-    # 1. Generate and save plot image
+    pred_F_obs = forward_euler_sim(res.x)
+    pred_F_fine = forward_euler_sim(res.x) # coarse grid call
+    
+    # 1. Plot Normalized Data, Reactive Model, and Tracer
     plt.figure(figsize=(9, 5.5), dpi=150)
-    plt.plot(t_obs / tR, F_obs / C_in_F, 'ro', markersize=5, label='Experimental Data (C+F)')
-    plt.plot(t_obs / tR, pred_F / C_in_F, 'b-', linewidth=2, 
-             label=f'Fitted Model (k_ad={k_ad_opt:.2f} L/mol/min, q_max={q_max_opt:.2e} mol/g)')
+    plt.plot(t_obs / tR, F_obs / C_in_F, 'ro', markersize=5, label='Experimental Data ($C/C_{in}$)')
+    plt.plot(t_fine / tR, tracer_fine, 'g--', linewidth=2, label='Ideal Non-Reactive Tracer ($1 - e^{-t/t_R}$)')
+    plt.plot(t_obs / tR, pred_F_obs / C_in_F, 'b-', linewidth=2, 
+             label=f'Reactive Adsorption Fit ($k_{{ad}}$={k_ad_opt:.2f} L/mol/min)')
     
-    plt.xlabel('Dimensionless Time (t / t_R)', fontsize=12)
-    plt.ylabel('Normalized Fluoride (C / C_in)', fontsize=12)
-    plt.title('Calcite + Fluoride Adsorption Kinetic Fit\n(Q = 0.01 mL/min, C_in,F = 0.21 mM)', fontsize=12)
+    plt.xlabel('Dimensionless Time ($t / t_R$)', fontsize=12)
+    plt.ylabel('Normalized Fluoride ($C / C_{in}$)', fontsize=12)
+    plt.title('Normalized Fluoride Concentration & Non-Reactive Tracer Profile\n(Q = 0.01 mL/min, $C_{in,F}$ = 0.21 mM, $t_R$ = 5800 min)', fontsize=12)
     plt.grid(True, linestyle='--', alpha=0.6)
     plt.legend(fontsize=11)
+    plt.ylim(-0.02, 1.02)
     plt.tight_layout()
-    plt.savefig('fluoride_adsorption_fit.png')
-    print("Saved 'fluoride_adsorption_fit.png'")
+    plt.savefig('normalized_tracer_fit.png')
+    print("Saved 'normalized_tracer_fit.png'")
 
-    # 2. Automatically update README.md so results show directly on GitHub
+    # 2. Automatically update README.md
     readme_content = f"""# Fluorapatite Mass Balance & Adsorption Kinetics
 
 This repository runs the mass balance kinetic model for fluoride adsorption onto calcite in a continuous flow-stirred tank reactor (CFSTR).
 
-## Model Fit Result
+## Normalized Model Fit vs. Non-Reactive Tracer
 
-![Fluoride Adsorption Fit](fluoride_adsorption_fit.png)
+![Normalized Tracer Fit](normalized_tracer_fit.png)
 
 ## Optimized Kinetic Parameters
 
@@ -114,25 +121,26 @@ This repository runs the mass balance kinetic model for fluoride adsorption onto
 | **$\log_{{10}}(k_{{\\text{{F, ad}}}})$** | **{opt_log_k_ad:.4f}** | — |
 | **$\log_{{10}}(q_{{\\text{{max, F}}}})$** | **{opt_log_q_max:.4f}** | — |
 
-## Summary Data Table (First 10 Data Points)
+## Summary Data Table
 
-| Time (min) | $t/t_R$ | $F_{{\\text{{obs}}}}$ (mM) | $F_{{\\text{{pred}}}}$ (mM) | $C/C_{{\\text{{in, obs}}}}$ | $C/C_{{\\text{{in, pred}}}}$ |
-| :---: | :---: | :---: | :---: | :---: | :---: |
+| Time (min) | $t/t_R$ | $F_{{\\text{{obs}}}}$ (mM) | $F_{{\\text{{pred}}}}$ (mM) | $C/C_{{\\text{{in, obs}}}}$ | $C/C_{{\\text{{in, pred}}}}$ | Non-Reactive Tracer ($C/C_{{\\text{{in}}}}$) |
+| :---: | :---: | :---: | :---: | :---: | :---: | :---: |
 """
-    for i in range(10):
+    for i in range(12):
         t_m = t_obs[i]
         t_tr = t_m / tR
         f_o = F_obs[i] * 1000
-        f_p = pred_F[i] * 1000
+        f_p = pred_F_obs[i] * 1000
         c_o = F_obs[i] / C_in_F
-        c_p = pred_F[i] / C_in_F
-        readme_content += f"| {t_m} | {t_tr:.4f} | {f_o:.3f} | {f_p:.3f} | {c_o:.4f} | {c_p:.4f} |\n"
+        c_p = pred_F_obs[i] / C_in_F
+        c_tr = 1.0 - np.exp(-t_m / tR)
+        readme_content += f"| {t_m} | {t_tr:.4f} | {f_o:.3f} | {f_p:.3f} | {c_o:.4f} | {c_p:.4f} | {c_tr:.4f} |\n"
 
     readme_content += "\n\n*Full dataset exported to `cfstr_fitted_adsorption_results.csv`.*"
 
     with open("README.md", "w") as f:
         f.write(readme_content)
-    print("Successfully updated README.md with fitted plot and parameter table!")
+    print("Successfully updated README.md!")
 
 if __name__ == "__main__":
     fit_and_update_github()
