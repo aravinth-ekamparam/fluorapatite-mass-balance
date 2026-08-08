@@ -1,146 +1,76 @@
 import numpy as np
 import pandas as pd
 import matplotlib.pyplot as plt
-from scipy.optimize import minimize
 
-# --- 1. Experimental Observed Data ---
-obs_data = pd.DataFrame({
-    "time_min": [
-        150, 450, 750, 1050, 1350, 1650, 1950, 2250, 2550, 2850, 3150, 3450, 3750, 4050, 
-        4350, 4650, 4950, 5250, 5550, 5850, 6150, 6450, 6750, 7050, 7350, 7650, 7950, 
-        8250, 8550, 8850, 9150, 9450, 9750, 10200, 10650, 10950, 11250, 11550, 11850, 
-        12150, 12450, 12750
-    ],
-    "F_obs_M": [
-        2.02E-05, 1.92E-05, 2.11E-05, 2.44E-05, 2.74E-05, 3.05E-05, 3.37E-05, 3.52E-05, 
-        3.90E-05, 4.15E-05, 4.32E-05, 4.53E-05, 4.80E-05, 4.86E-05, 5.12E-05, 5.39E-05, 
-        5.28E-05, 5.60E-05, 5.79E-05, 5.90E-05, 6.34E-05, 6.17E-05, 6.34E-05, 6.34E-05, 
-        6.34E-05, 6.88E-05, 6.76E-05, 6.65E-05, 7.31E-05, 7.68E-05, 7.52E-05, 7.52E-05, 
-        7.79E-05, 7.81E-05, 8.08E-05, 8.23E-05, 8.13E-05, 7.90E-05, 8.08E-05, 7.96E-05, 
-        8.34E-05, 8.23E-05
-    ]
-})
-
-# --- 2. System Constants ---
+# --- 1. System & Reactor Setup ---
 V = 0.058             # Reactor volume (L) [58 mL]
 Q = 0.01 / 1000.0     # Flow rate (L/min) [0.01 mL/min]
-S_calcite_0 = 4.0     # Calcite loading (g/L)
-C_in_F = 0.21 / 1000.0# Influent F concentration (0.21 mM -> M)
-dt = 0.5              # Integration time step (min)
+S_calcite_0 = 4.0     # Initial calcite loading (g/L)
+SSA_calcite = 3.0     # Calcite specific surface area (m^2/g)
+MW_calcite = 100.09   # g/mol
 
-t_obs = obs_data["time_min"].values
-F_obs = obs_data["F_obs_M"].values
-tR = V / Q            # Residence time = 5800 minutes
+# Inflow Concentrations
+C_in_F = 0.21 / 1000.0# Influent F: 0.21 mM
+C_in_Ca = 1.0e-5      # Influent Ca: 0.01 mM
+C_in_CO3 = 1.0e-5     # Influent CO3: 0.01 mM
 
+# --- 2. Dissolution & Adsorption Kinetic Constants ---
+k_diss_calcite = 10**(-5.90)  # mol/m^2/min (calcite dissolution rate)
+Ksp_calcite = 10**(-8.48)     # Calcite solubility product
+k_gl = 10**(-4.06)            # CO2 gas-liquid transfer rate (min^-1)
 
-def forward_euler_sim(params):
-    """
-    Forward Euler integration tracking fluoride uptake in CFSTR reactor.
-    """
-    log_k_ad, log_q_max = params
-    k_F_ad = 10**log_k_ad
-    q_max_F = 10**log_q_max
+# Fitted Adsorption Parameters
+k_F_ad = 1.565                # L/mol/min
+q_max_F = 8.968e-5            # mol/g
+
+# --- 3. Numerical Simulation Loop ---
+dt = 0.2                       # min
+t_end = 12750.0                # min
+steps = int(t_end / dt)
+
+C_F, C_Ca, C_CO3 = 0.0, C_in_Ca, C_in_CO3
+S_calcite = S_calcite_0
+q_F = 0.0
+
+results = []
+
+for step in range(steps):
+    t = step * dt
     
-    t_end = t_obs[-1]
-    steps = int(t_end / dt) + 1
-    t_grid = np.linspace(0, t_end, steps)
+    # 1. Calcite Saturation Index & Dissolution Rate
+    IAP_calcite = C_Ca * C_CO3
+    Omega_calcite = IAP_calcite / Ksp_calcite
     
-    C_F_arr = np.zeros(steps)
-    q_F_arr = np.zeros(steps)
-    
-    C_F = 0.0
-    q_F = 0.0
-    
-    for i in range(1, steps):
-        r_ad_F = S_calcite_0 * k_F_ad * C_F * max(0.0, q_max_F - q_F)
-        dC_F_dt = (Q / V) * (C_in_F - C_F) - r_ad_F
+    # Dissolution rate (mol/L/min) occurs when undersaturated (Omega < 1)
+    if Omega_calcite < 1.0 and S_calcite > 0:
+        r_diss = S_calcite * SSA_calcite * k_diss_calcite * (1.0 - Omega_calcite)
+    else:
+        r_diss = 0.0
         
-        C_F += dC_F_dt * dt
-        q_F += (r_ad_F / S_calcite_0) * dt
-        
-        C_F_arr[i] = C_F
-        q_F_arr[i] = q_F
-        
-    return np.interp(t_obs, t_grid, C_F_arr)
-
-
-def objective(params):
-    pred_F = forward_euler_sim(params)
-    return np.sum((pred_F - F_obs)**2)
-
-
-def fit_and_update_github():
-    print("Fitting adsorption rate parameters to observed data...")
+    # 2. Fluoride Adsorption Rate (mol/L/min)
+    r_ad_F = S_calcite * k_F_ad * C_F * max(0.0, q_max_F - q_F)
     
-    initial_guess = [0.0, -4.5]
-    res = minimize(objective, x0=initial_guess, method='Nelder-Mead')
+    # 3. Coupled Liquid Mass Balances
+    dC_F_dt = (Q / V) * (C_in_F - C_F) - r_ad_F
+    dC_Ca_dt = (Q / V) * (C_in_Ca - C_Ca) + r_diss
+    dC_CO3_dt = (Q / V) * (C_in_CO3 - C_CO3) + r_diss
     
-    opt_log_k_ad, opt_log_q_max = res.x
-    k_ad_opt = 10**opt_log_k_ad
-    q_max_opt = 10**opt_log_q_max
+    # 4. Forward Euler Updates
+    C_F += dC_F_dt * dt
+    C_Ca += dC_Ca_dt * dt
+    C_CO3 += dC_CO3_dt * dt
+    q_F += (r_ad_F / S_calcite) * dt
+    S_calcite -= (r_diss * MW_calcite / 1000.0) * dt # Calcite mass loss
     
-    # Generate high resolution curves
-    t_fine = np.linspace(0, t_obs[-1], 1000)
-    tracer_fine = 1.0 - np.exp(-t_fine / tR) # Non-reactive tracer solution
-    
-    pred_F_obs = forward_euler_sim(res.x)
-    pred_F_fine = forward_euler_sim(res.x) # coarse grid call
-    
-    # 1. Plot Normalized Data, Reactive Model, and Tracer
-    plt.figure(figsize=(9, 5.5), dpi=150)
-    plt.plot(t_obs / tR, F_obs / C_in_F, 'ro', markersize=5, label='Experimental Data ($C/C_{in}$)')
-    plt.plot(t_fine / tR, tracer_fine, 'g--', linewidth=2, label='Ideal Non-Reactive Tracer ($1 - e^{-t/t_R}$)')
-    plt.plot(t_obs / tR, pred_F_obs / C_in_F, 'b-', linewidth=2, 
-             label=f'Reactive Adsorption Fit ($k_{{ad}}$={k_ad_opt:.2f} L/mol/min)')
-    
-    plt.xlabel('Dimensionless Time ($t / t_R$)', fontsize=12)
-    plt.ylabel('Normalized Fluoride ($C / C_{in}$)', fontsize=12)
-    plt.title('Normalized Fluoride Concentration & Non-Reactive Tracer Profile\n(Q = 0.01 mL/min, $C_{in,F}$ = 0.21 mM, $t_R$ = 5800 min)', fontsize=12)
-    plt.grid(True, linestyle='--', alpha=0.6)
-    plt.legend(fontsize=11)
-    plt.ylim(-0.02, 1.02)
-    plt.tight_layout()
-    plt.savefig('normalized_tracer_fit.png')
-    print("Saved 'normalized_tracer_fit.png'")
+    if step % 500 == 0:
+        results.append({
+            "time_min": t,
+            "C_F_mM": C_F * 1000,
+            "C_Ca_mM": C_Ca * 1000,
+            "C_CO3_mM": C_CO3 * 1000,
+            "S_calcite_gL": S_calcite
+        })
 
-    # 2. Automatically update README.md
-    readme_content = f"""# Fluorapatite Mass Balance & Adsorption Kinetics
-
-This repository runs the mass balance kinetic model for fluoride adsorption onto calcite in a continuous flow-stirred tank reactor (CFSTR).
-
-## Normalized Model Fit vs. Non-Reactive Tracer
-
-![Normalized Tracer Fit](normalized_tracer_fit.png)
-
-## Optimized Kinetic Parameters
-
-| Parameter | Fitted Value | Unit |
-| :--- | :--- | :--- |
-| **Adsorption Rate Constant ($k_{{\\text{{F, ad}}}}$)** | **{k_ad_opt:.3f}** | $\\text{{L}} \\cdot \\text{{mol}}^{{-1}} \\cdot \\text{{min}}^{{-1}}$ |
-| **Max Capacity ($q_{{\\text{{max, F}}}}$)** | **{q_max_opt:.3e}** | $\\text{{mol}} \\cdot \\text{{g}}^{{-1}}$ |
-| **$\log_{{10}}(k_{{\\text{{F, ad}}}})$** | **{opt_log_k_ad:.4f}** | — |
-| **$\log_{{10}}(q_{{\\text{{max, F}}}})$** | **{opt_log_q_max:.4f}** | — |
-
-## Summary Data Table
-
-| Time (min) | $t/t_R$ | $F_{{\\text{{obs}}}}$ (mM) | $F_{{\\text{{pred}}}}$ (mM) | $C/C_{{\\text{{in, obs}}}}$ | $C/C_{{\\text{{in, pred}}}}$ | Non-Reactive Tracer ($C/C_{{\\text{{in}}}}$) |
-| :---: | :---: | :---: | :---: | :---: | :---: | :---: |
-"""
-    for i in range(12):
-        t_m = t_obs[i]
-        t_tr = t_m / tR
-        f_o = F_obs[i] * 1000
-        f_p = pred_F_obs[i] * 1000
-        c_o = F_obs[i] / C_in_F
-        c_p = pred_F_obs[i] / C_in_F
-        c_tr = 1.0 - np.exp(-t_m / tR)
-        readme_content += f"| {t_m} | {t_tr:.4f} | {f_o:.3f} | {f_p:.3f} | {c_o:.4f} | {c_p:.4f} | {c_tr:.4f} |\n"
-
-    readme_content += "\n\n*Full dataset exported to `cfstr_fitted_adsorption_results.csv`.*"
-
-    with open("README.md", "w") as f:
-        f.write(readme_content)
-    print("Successfully updated README.md!")
-
-if __name__ == "__main__":
-    fit_and_update_github()
+df = pd.DataFrame(results)
+df.to_csv("coupled_dissolution_adsorption_results.csv", index=False)
+print("Coupled calcite dissolution + fluoride adsorption simulation completed successfully!")
