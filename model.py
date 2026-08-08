@@ -1,80 +1,93 @@
 import numpy as np
 import pandas as pd
+from scipy.optimize import minimize
 
-def run_cfstr_calcite_fluoride_model():
-    """
-    Forward Euler CFSTR Mass Balance Model tuned for:
-    Experiment: Calcite + Fluoride (C+F)
-    Flow Rate (Q): 0.01 mL/min
-    Influent F Concentration: 0.21 mM
-    Calcite Loading: 4 g/L
-    Simulated duration: 25 residence times (t/tR = 25)
-    """
-    # --- 1. Reactor Setup & Experimental Constants ---
-    V = 0.058             # Reactor volume (L) [58 mL]
-    Q = 0.01 / 1000.0     # Flow rate (L/min) [0.01 mL/min]
-    S_calcite_0 = 4.0     # Calcite loading (g/L)
-    SSA_calcite = 3.0     # Specific surface area of calcite (m^2/g)
+# Experimental data provided in image
+time_obs = np.array([
+    150, 450, 750, 1050, 1350, 1650, 1950, 2250, 2550, 2850, 3150, 3450, 3750, 4050, 
+    4350, 4650, 4950, 5250, 5550, 5850, 6150, 6450, 6750, 7050, 7350, 7650, 7950, 
+    8250, 8550, 8850, 9150, 9450, 9750, 10200, 10650, 10950, 11250, 11550, 11850, 
+    12150, 12450, 12750
+])
+
+F_obs = np.array([
+    2.02E-05, 1.92E-05, 2.11E-05, 2.44E-05, 2.74E-05, 3.05E-05, 3.37E-05, 3.52E-05, 
+    3.90E-05, 4.15E-05, 4.32E-05, 4.53E-05, 4.80E-05, 4.86E-05, 5.12E-05, 5.39E-05, 
+    5.28E-05, 5.60E-05, 5.79E-05, 5.90E-05, 6.34E-05, 6.17E-05, 6.34E-05, 6.34E-05, 
+    6.34E-05, 6.88E-05, 6.76E-05, 6.65E-05, 7.31E-05, 7.68E-05, 7.52E-05, 7.52E-05, 
+    7.79E-05, 7.81E-05, 8.08E-05, 8.23E-05, 8.13E-05, 7.90E-05, 8.08E-05, 7.96E-05, 
+    8.34E-05, 8.23E-05
+])
+
+# Fixed parameters
+V = 0.058             # L
+Q = 0.01 / 1000.0     # L/min
+S_calcite_0 = 4.0     # g/L
+C_in_F = 0.21 / 1000.0# M (0.21 mM)
+dt = 0.1              # min
+
+def simulate(log_k_F, q_max_F):
+    k_F_ad = 10**log_k_F
+    t_max = time_obs[-1]
+    steps = int(t_max / dt) + 1
     
-    # Residence Time Calculation
-    tR = V / Q             # Residence time tR = 5800 minutes
+    C_F = 0.0
+    q_F = 0.0
     
-    # Inflow Influent Concentrations (moles/L)
-    C_in_F = 0.21 / 1000.0   # Influent Fluoride: 0.21 mM
-    C_in_Ca = 0.10 / 1000.0  # Initial dissolved Calcium in equilibrium with calcite
+    sim_t = []
+    sim_C_F = []
     
-    # Fitted Kinetic Parameters from C+F Control System
-    k_gl = 10**(-4.06)      # Gas-liquid CO2 exchange coefficient (min^-1)
-    k_F_ad = 10**(-6.47)    # Fluoride adsorption rate constant onto calcite (min^-1)
-    
-    # Langmuir Adsorption Isotherm Constants for F on Calcite
-    q_max_F = 1.0e-5        # Maximum adsorption capacity (moles F / g calcite)
-    
-    # --- 2. Initial State Variables ---
-    C_F = 0.0               # Initial reactor fluoride (moles/L)
-    C_Ca = C_in_Ca          # Initial reactor calcium (moles/L)
-    q_F = 0.0               # Initial sorbed fluoride on calcite (moles/g)
-    
-    # --- 3. Forward Euler Time Discretization ---
-    dt = 0.1                # Integration time step (minutes)
-    t_end = 25.0 * tR       # Total simulation time = 25 * tR = 145,000 minutes
-    steps = int(t_end / dt)
-    
-    results = []
-    
-    # --- 4. Simulation Loop ---
     for step in range(steps):
         t = step * dt
-        
-        # Rate of Fluoride Adsorption onto Calcite (moles/L/min)
+        if t in time_obs or any(abs(t - to) < dt/2 for to in time_obs):
+            sim_t.append(t)
+            sim_C_F.append(C_F)
+            
         r_ad_F = S_calcite_0 * k_F_ad * (q_max_F - q_F)
-        
-        # Liquid Mass Balance Equations (Forward Euler)
         dC_F_dt = (Q / V) * (C_in_F - C_F) - r_ad_F
-        dC_Ca_dt = (Q / V) * (C_in_Ca - C_Ca)
         
-        # State Updates
         C_F += dC_F_dt * dt
-        C_Ca += dC_Ca_dt * dt
         q_F += (r_ad_F / S_calcite_0) * dt
         
-        # Record Output every 10 minutes (100 steps)
-        if step % 100 == 0:
-            results.append({
-                "time_min": round(t, 2),
-                "t_over_tR": round(t / tR, 4),
-                "C_F_mM": C_F * 1000.0,
-                "C_Ca_mM": C_Ca * 1000.0,
-                "C_F_normalized": C_F / C_in_F,
-                "sorbed_F_umol_g": q_F * 1e6
-            })
-            
-    # Save Results to CSV
-    df = pd.DataFrame(results)
-    df.to_csv("cfstr_model_results.csv", index=False)
-    print("Simulation completed successfully!")
-    print(f"Total simulated time: {t_end / tR:.1f} t/tR ({t_end:.0f} minutes)")
-    print(f"Final normalized fluoride concentration (C/Cin): {df['C_F_normalized'].iloc[-1]:.4f}")
+    # Interpolate C_F at exact observed times
+    C_F_interp = np.interp(time_obs, np.arange(steps)*dt, [0.0] + list(np.cumsum([0.0]*steps)) if False else np.zeros(steps))
+    return sim_C_F
 
-if __name__ == "__main__":
-    run_cfstr_calcite_fluoride_model()
+# Let's write a proper numerical simulation for optimization
+def run_model_for_times(params):
+    log_k_F, log_q_max = params
+    k_F_ad = 10**log_k_F
+    q_max_F = 10**log_q_max
+    
+    t_eval = np.arange(0, time_obs[-1] + dt, dt)
+    n_steps = len(t_eval)
+    
+    C_F_arr = np.zeros(n_steps)
+    q_F_arr = np.zeros(n_steps)
+    
+    C_F = 0.0
+    q_F = 0.0
+    
+    for i in range(1, n_steps):
+        r_ad_F = S_calcite_0 * k_F_ad * max(0.0, q_max_F - q_F)
+        dC_F_dt = (Q / V) * (C_in_F - C_F) - r_ad_F
+        
+        C_F += dC_F_dt * dt
+        q_F += (r_ad_F / S_calcite_0) * dt
+        
+        C_F_arr[i] = C_F
+        q_F_arr[i] = q_F
+        
+    # Interpolate to time_obs
+    predicted = np.interp(time_obs, t_eval, C_F_arr)
+    return predicted
+
+def objective(params):
+    pred = run_model_for_times(params)
+    res = np.sum((pred - F_obs)**2)
+    return res
+
+res = minimize(objective, x0=[-6.47, -5.0], bounds=[(-10.0, -2.0), (-7.0, -3.0)], method='L-BFGS-B')
+print("Optimal params:", res.x)
+print("k_F_ad = 10^", res.x[0], "min^-1")
+print("q_max_F = 10^", res.x[1], "mol/g")
