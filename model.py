@@ -1,92 +1,76 @@
 import numpy as np
 import pandas as pd
 
-def run_cfstr_mass_balance():
-    # --- 1. Reactor Setup & Fixed Parameters ---
-    V = 0.058          # Reactor volume (L)
-    Q = 0.03 / 1000.0  # Flow rate (L/min) [0.03 mL/min]
-    S_calcite_0 = 4.0  # Calcite loading (g/L)
-    SSA_calcite = 3.0  # Specific surface area of calcite (m^2/g)
+def run_cfstr_calcite_fluoride_model():
+    """
+    Forward Euler CFSTR Mass Balance Model tuned for:
+    Experiment: Calcite + Fluoride (C+F)
+    Flow Rate (Q): 0.01 mL/min
+    Influent F Concentration: 0.21 mM
+    Calcite Loading: 4 g/L
+    """
+    # --- 1. Reactor Setup & Experimental Constants ---
+    V = 0.058             # Reactor volume (L) [58 mL]
+    Q = 0.01 / 1000.0     # Flow rate (L/min) [0.01 mL/min]
+    S_calcite_0 = 4.0     # Calcite loading (g/L)
+    SSA_calcite = 3.0     # Specific surface area of calcite (m^2/g)
     
-    # Inlet Influent Concentrations (mM converted to moles/L)
-    C_in_F = 0.21 / 1000.0   # 0.21 mM F
-    C_in_P = 1.00 / 1000.0   # 1.00 mM PO4
-    C_in_Ca = 0.10 / 1000.0  # Initial dissolved Ca in equilibrium with calcite
+    # Inflow Influent Concentrations (moles/L)
+    C_in_F = 0.21 / 1000.0   # Influent Fluoride: 0.21 mM
+    C_in_Ca = 0.10 / 1000.0  # Initial dissolved Calcium in equilibrium with calcite
     
-    # Kinetic Parameters (Log values from published fit)
-    k_gl = 10**(-4.06)         # CO2 gas-liquid transfer rate coefficient (min^-1)
-    k_F_ad = 10**(-6.47)       # Fluoride adsorption rate constant (min^-1)
-    k_P_ad = 10**(-4.07)       # Phosphate adsorption rate constant (min^-1)
-    k_HA = 10**(-21.74) * 1e-6 # HA precipitation rate constant (mol/m^2/min)
-    k_FA = 10**(-28.24) * 1e-6 # FA precipitation rate constant (mol/m^2/min)
+    # Fitted Kinetic Parameters from C+F Control System
+    k_gl = 10**(-4.06)      # Gas-liquid CO2 exchange coefficient (min^-1)
+    k_F_ad = 10**(-6.47)    # Fluoride adsorption rate constant onto calcite (min^-1)
     
-    Omega_star_HA = 1.38   # Critical supersaturation ratio for HA
-    Omega_star_FA = 1.37   # Critical supersaturation ratio for FA
+    # Langmuir Adsorption Isotherm Constants for F on Calcite
+    q_max_F = 1.0e-5        # Maximum adsorption capacity (moles F / g calcite)
     
-    # Initial Aqueous Concentrations in Reactor (moles/L)
-    C_F = 0.0
-    C_P = 0.0
-    C_Ca = C_in_Ca
+    # --- 2. Initial State Variables ---
+    C_F = 0.0               # Initial reactor fluoride (moles/L)
+    C_Ca = C_in_Ca          # Initial reactor calcium (moles/L)
+    q_F = 0.0               # Initial sorbed fluoride on calcite (moles/g)
     
-    # Adsorbed Concentrations (moles/g calcite)
-    S_ad_F = 0.0
-    S_ad_P = 0.0
-    S_ad_F_eq = 1e-5 # Equilibrium capacity target
-    S_ad_P_eq = 5e-5 # Equilibrium capacity target
-    
-    # --- 2. Forward Euler Numerical Integration ---
-    t_end = 300.0    # Total runtime (minutes)
-    dt = 0.1         # Euler time step (minutes)
+    # --- 3. Forward Euler Time Discretization ---
+    dt = 0.1                # Time step (minutes)
+    t_end = 300.0           # Total simulation time (minutes)
     steps = int(t_end / dt)
     
     results = []
     
+    # --- 4. Simulation Loop ---
     for step in range(steps):
         t = step * dt
         
-        # Approximate driving forces for precipitation
-        IAP_HA = (C_Ca**5) * (C_P**3)
-        Ksp_HA = 10**(-58.33)
-        Omega_HA = (IAP_HA / Ksp_HA)**(1/9)
+        # Rate of Fluoride Adsorption onto Calcite (moles/L/min)
+        # R_ad = S_calcite * k_F_ad * (q_max - q_F)
+        r_ad_F = S_calcite_0 * k_F_ad * (q_max_F - q_F)
         
-        IAP_FA = (C_Ca**5) * (C_P**3) * C_F
-        Ksp_FA = 10**(-59.74)
-        Omega_FA = (IAP_FA / Ksp_FA)**(1/9)
+        # Liquid Mass Balance Equations (Forward Euler)
+        # dC_F/dt = (Q/V)*(C_in_F - C_F) - R_ad_F
+        dC_F_dt = (Q / V) * (C_in_F - C_F) - r_ad_F
+        dC_Ca_dt = (Q / V) * (C_in_Ca - C_Ca)
         
-        # Classical Nucleation Rate Activation check
-        r_prec_HA = k_HA * SSA_calcite * S_calcite_0 * (Omega_HA - 1) if Omega_HA > Omega_star_HA else 0.0
-        r_prec_FA = k_FA * SSA_calcite * S_calcite_0 * (Omega_FA - 1) if Omega_FA > Omega_star_FA else 0.0
-        
-        # Rates of Adsorption
-        r_ad_F = S_calcite_0 * k_F_ad * (S_ad_F_eq - S_ad_F)
-        r_ad_P = S_calcite_0 * k_P_ad * (S_ad_P_eq - S_ad_P)
-        
-        # Forward Euler Liquid Mass Balances
-        dC_F_dt = (Q/V) * (C_in_F - C_F) - r_ad_F - r_prec_FA
-        dC_P_dt = (Q/V) * (C_in_P - C_P) - r_ad_P - (3.0 * r_prec_HA) - (3.0 * r_prec_FA)
-        dC_Ca_dt = (Q/V) * (C_in_Ca - C_Ca) - (5.0 * r_prec_HA) - (5.0 * r_prec_FA)
-        
-        # Forward Euler Updates
+        # State Updates
         C_F += dC_F_dt * dt
-        C_P += dC_P_dt * dt
         C_Ca += dC_Ca_dt * dt
-        S_ad_F += (r_ad_F / S_calcite_0) * dt
-        S_ad_P += (r_ad_P / S_calcite_0) * dt
+        q_F += (r_ad_F / S_calcite_0) * dt
         
-        # Save output every 10 steps
+        # Record Output every 1 minute (every 10 steps)
         if step % 10 == 0:
             results.append({
-                "time_min": t,
+                "time_min": round(t, 2),
                 "C_F_mM": C_F * 1000.0,
-                "C_P_mM": C_P * 1000.0,
                 "C_Ca_mM": C_Ca * 1000.0,
                 "C_F_normalized": C_F / C_in_F,
-                "C_P_normalized": C_P / C_in_P
+                "sorbed_F_umol_g": q_F * 1e6
             })
             
+    # Save Results to CSV
     df = pd.DataFrame(results)
     df.to_csv("cfstr_model_results.csv", index=False)
-    print("Simulation completed successfully. Output saved to cfstr_model_results.csv.")
+    print("Simulation completed successfully!")
+    print(f"Final normalized fluoride concentration (C/Cin) at t={t_end} min: {df['C_F_normalized'].iloc[-1]:.4f}")
 
 if __name__ == "__main__":
-    run_cfstr_mass_balance()
+    run_cfstr_calcite_fluoride_model()
