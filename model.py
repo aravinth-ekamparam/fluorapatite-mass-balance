@@ -111,11 +111,11 @@ def sim_cf(params, cond):
     return np.interp(t_obs, t_grid, Y[:, 0])
 
 
-# --- 4. System 2 (C+P) RK4 Simulator with Smooth Precursor Activation ---
-def sim_cp_smooth_activation(params, cond):
-    log_k_HA, Omega_star_HA, log_tau_grow = params
-    k_HA = 10**log_k_HA
-    tau_grow = 10**log_tau_grow * (V / cond['Q_L_min'])
+# --- 4. System 2 (C+P) RK4 Simulator with Corrected Critical Length Scaling ---
+def sim_cp_crit_length(params, cond):
+    log_k_prec, Omega_star_HA, log_k_nuc = params
+    k_prec = 10**log_k_prec
+    k_nuc = 10**log_k_nuc
     
     Q = cond['Q_L_min']
     pin_M = cond['Pin_M']
@@ -125,54 +125,57 @@ def sim_cp_smooth_activation(params, cond):
     steps = int(t_end / dt) + 1
     t_grid = np.linspace(0, t_end, steps)
     
-    Y = np.zeros((steps, 4))
-    Y[0] = [0.0, 1.0e-5, 1.0e-5, S_calcite_0]
+    # State Y: [C_P, C_Ca, C_CO3, L_nuc, S_calcite]
+    Y = np.zeros((steps, 5))
+    Y[0] = [0.0, 1.0e-5, 1.0e-5, 0.0, S_calcite_0]
     
     for i in range(steps - 1):
-        t_curr = t_grid[i]
-        C_P, C_Ca, C_CO3, S_calcite = Y[i]
+        C_P, C_Ca, C_CO3, L_nuc, S_calcite = Y[i]
         
-        # Calcite dissolution
         IAP_calc = max(1e-12, C_Ca * C_CO3)
         Omega_calc = IAP_calc / Ksp_calcite
         r_diss = S_calcite * SSA_calcite * k_diss_calcite * max(0.0, 1.0 - Omega_calc) if S_calcite > 0 else 0.0
-        
-        # Smooth Sigmoidal Precursor Growth Activation Factor
-        activation = 1.0 - np.exp(-t_curr / max(1.0, tau_grow))
         
         if C_Ca > 0 and C_P > 0:
             log_IAP_HA = 5.0 * np.log10(max(1e-12, C_Ca)) + 3.0 * np.log10(max(1e-12, C_P))
             log_Omega_HA = (log_IAP_HA - (-58.33)) / 8.0
             Omega_HA = 10**min(3.0, log_Omega_HA)
-            r_prec_HA = k_HA * SSA_calcite * max(0.0, S_calcite) * (Omega_HA - 1.0) * activation if Omega_HA > Omega_star_HA else 0.0
         else:
-            r_prec_HA = 0.0
+            Omega_HA = 0.0
             
+        # Nucleus size growth
+        dL_dt = k_nuc * max(0.0, Omega_HA - Omega_star_HA)
+        
+        # Smooth growth factor (L_nuc / (1 + L_nuc))
+        growth_activation = L_nuc / (1.0 + L_nuc) if L_nuc > 0 else 0.0
+        r_prec_HA = k_prec * SSA_calcite * max(0.0, S_calcite) * max(0.0, Omega_HA - Omega_star_HA) * growth_activation
+        
         dC_P_dt = (Q/V)*(pin_M - C_P) - 3.0 * r_prec_HA
         dC_Ca_dt = (Q/V)*(1e-5 - C_Ca) + r_diss - 5.0 * r_prec_HA
         dC_CO3_dt = (Q/V)*(1e-5 - C_CO3) + r_diss
+        dL_nuc_dt = dL_dt
         dS_calcite_dt = -r_diss * MW_calcite / 1000.0
         
-        k1 = np.array([dC_P_dt, dC_Ca_dt, dC_CO3_dt, dS_calcite_dt])
+        k1 = np.array([dC_P_dt, dC_Ca_dt, dC_CO3_dt, dL_nuc_dt, dS_calcite_dt])
         
-        t_mid = t_curr + 0.5 * dt
         y2 = Y[i] + 0.5 * dt * k1
-        C_P, C_Ca, C_CO3, S_calcite = y2
+        C_P, C_Ca, C_CO3, L_nuc, S_calcite = y2
         IAP_calc = max(1e-12, C_Ca * C_CO3)
         Omega_calc = IAP_calc / Ksp_calcite
         r_diss = S_calcite * SSA_calcite * k_diss_calcite * max(0.0, 1.0 - Omega_calc) if S_calcite > 0 else 0.0
-        activation = 1.0 - np.exp(-t_mid / max(1.0, tau_grow))
         if C_Ca > 0 and C_P > 0:
             log_IAP_HA = 5.0 * np.log10(max(1e-12, C_Ca)) + 3.0 * np.log10(max(1e-12, C_P))
             log_Omega_HA = (log_IAP_HA - (-58.33)) / 8.0
             Omega_HA = 10**min(3.0, log_Omega_HA)
-            r_prec_HA = k_HA * SSA_calcite * max(0.0, S_calcite) * (Omega_HA - 1.0) * activation if Omega_HA > Omega_star_HA else 0.0
         else:
-            r_prec_HA = 0.0
-        k2 = np.array([(Q/V)*(pin_M-C_P)-3*r_prec_HA, (Q/V)*(1e-5-C_Ca)+r_diss-5*r_prec_HA, (Q/V)*(1e-5-C_CO3)+r_diss, -r_diss*MW_calcite/1000.0])
+            Omega_HA = 0.0
+        dL_dt = k_nuc * max(0.0, Omega_HA - Omega_star_HA)
+        growth_activation = L_nuc / (1.0 + L_nuc) if L_nuc > 0 else 0.0
+        r_prec_HA = k_prec * SSA_calcite * max(0.0, S_calcite) * max(0.0, Omega_HA - Omega_star_HA) * growth_activation
+        k2 = np.array([(Q/V)*(pin_M-C_P)-3*r_prec_HA, (Q/V)*(1e-5-C_Ca)+r_diss-5*r_prec_HA, (Q/V)*(1e-5-C_CO3)+r_diss, dL_dt, -r_diss*MW_calcite/1000.0])
 
         y3 = Y[i] + 0.5 * dt * k2
-        C_P, C_Ca, C_CO3, S_calcite = y3
+        C_P, C_Ca, C_CO3, L_nuc, S_calcite = y3
         IAP_calc = max(1e-12, C_Ca * C_CO3)
         Omega_calc = IAP_calc / Ksp_calcite
         r_diss = S_calcite * SSA_calcite * k_diss_calcite * max(0.0, 1.0 - Omega_calc) if S_calcite > 0 else 0.0
@@ -180,26 +183,28 @@ def sim_cp_smooth_activation(params, cond):
             log_IAP_HA = 5.0 * np.log10(max(1e-12, C_Ca)) + 3.0 * np.log10(max(1e-12, C_P))
             log_Omega_HA = (log_IAP_HA - (-58.33)) / 8.0
             Omega_HA = 10**min(3.0, log_Omega_HA)
-            r_prec_HA = k_HA * SSA_calcite * max(0.0, S_calcite) * (Omega_HA - 1.0) * activation if Omega_HA > Omega_star_HA else 0.0
         else:
-            r_prec_HA = 0.0
-        k3 = np.array([(Q/V)*(pin_M-C_P)-3*r_prec_HA, (Q/V)*(1e-5-C_Ca)+r_diss-5*r_prec_HA, (Q/V)*(1e-5-C_CO3)+r_diss, -r_diss*MW_calcite/1000.0])
+            Omega_HA = 0.0
+        dL_dt = k_nuc * max(0.0, Omega_HA - Omega_star_HA)
+        growth_activation = L_nuc / (1.0 + L_nuc) if L_nuc > 0 else 0.0
+        r_prec_HA = k_prec * SSA_calcite * max(0.0, S_calcite) * max(0.0, Omega_HA - Omega_star_HA) * growth_activation
+        k3 = np.array([(Q/V)*(pin_M-C_P)-3*r_prec_HA, (Q/V)*(1e-5-C_Ca)+r_diss-5*r_prec_HA, (Q/V)*(1e-5-C_CO3)+r_diss, dL_dt, -r_diss*MW_calcite/1000.0])
 
-        t_next = t_curr + dt
         y4 = Y[i] + dt * k3
-        C_P, C_Ca, C_CO3, S_calcite = y4
+        C_P, C_Ca, C_CO3, L_nuc, S_calcite = y4
         IAP_calc = max(1e-12, C_Ca * C_CO3)
         Omega_calc = IAP_calc / Ksp_calcite
         r_diss = S_calcite * SSA_calcite * k_diss_calcite * max(0.0, 1.0 - Omega_calc) if S_calcite > 0 else 0.0
-        activation = 1.0 - np.exp(-t_next / max(1.0, tau_grow))
         if C_Ca > 0 and C_P > 0:
             log_IAP_HA = 5.0 * np.log10(max(1e-12, C_Ca)) + 3.0 * np.log10(max(1e-12, C_P))
             log_Omega_HA = (log_IAP_HA - (-58.33)) / 8.0
             Omega_HA = 10**min(3.0, log_Omega_HA)
-            r_prec_HA = k_HA * SSA_calcite * max(0.0, S_calcite) * (Omega_HA - 1.0) * activation if Omega_HA > Omega_star_HA else 0.0
         else:
-            r_prec_HA = 0.0
-        k4 = np.array([(Q/V)*(pin_M-C_P)-3*r_prec_HA, (Q/V)*(1e-5-C_Ca)+r_diss-5*r_prec_HA, (Q/V)*(1e-5-C_CO3)+r_diss, -r_diss*MW_calcite/1000.0])
+            Omega_HA = 0.0
+        dL_dt = k_nuc * max(0.0, Omega_HA - Omega_star_HA)
+        growth_activation = L_nuc / (1.0 + L_nuc) if L_nuc > 0 else 0.0
+        r_prec_HA = k_prec * SSA_calcite * max(0.0, S_calcite) * max(0.0, Omega_HA - Omega_star_HA) * growth_activation
+        k4 = np.array([(Q/V)*(pin_M-C_P)-3*r_prec_HA, (Q/V)*(1e-5-C_Ca)+r_diss-5*r_prec_HA, (Q/V)*(1e-5-C_CO3)+r_diss, dL_dt, -r_diss*MW_calcite/1000.0])
 
         Y[i + 1] = Y[i] + (dt / 6.0) * (k1 + 2*k2 + 2*k3 + k4)
 
@@ -214,10 +219,10 @@ def obj_cf(params):
         sse += np.sum(((cond['f_obs'] - pred) / cond['Fin_M'])**2)
     return sse
 
-def obj_cp_smooth(params):
+def obj_cp_crit_length(params):
     sse = 0.0
     for cond in cp_conditions:
-        pred = sim_cp_smooth_activation(params, cond)
+        pred = sim_cp_crit_length(params, cond)
         sse += np.sum(((cond['p_obs'] - pred) / cond['Pin_M'])**2)
     return sse
 
@@ -228,20 +233,20 @@ def main():
     k_F_ad_opt = 10**res_cf.x[0]
     q_max_F_opt = 10**res_cf.x[1]
 
-    print("Fitting System 2 (Calcite + Phosphate HA Precipitation with Precursor Phase Activation)...")
-    res_cp = minimize(obj_cp_smooth, x0=[-10.5, 1.05, -0.7], bounds=[(-13.0, -1.0), (1.0001, 3.0), (-2.0, 0.5)], method='L-BFGS-B')
-    k_HA_opt = 10**res_cp.x[0]
+    print("Fitting System 2 (Calcite + Phosphate via Nucleation Growth & Critical Length Scaling)...")
+    res_cp = minimize(obj_cp_crit_length, x0=[-10.5, 1.05, -3.0], method='Nelder-Mead')
+    k_prec_opt = 10**res_cp.x[0]
     Omega_star_HA_opt = res_cp.x[1]
-    tau_grow_opt = 10**res_cp.x[2]
+    k_nuc_opt = 10**res_cp.x[2]
 
     print("\n================ SYSTEM 1 (C+F) FITTED KINETICS ================")
     print(f"k_F_ad  = {k_F_ad_opt:.4f} L/(mol*min)")
     print(f"q_max_F = {q_max_F_opt:.4e} mol/g ({q_max_F_opt*1e6:.2f} umol/g)")
 
     print("\n================ SYSTEM 2 (C+P) FITTED KINETICS ================")
-    print(f"k_HA (Precipitation Rate) = {k_HA_opt:.4e} mol/m2/min")
-    print(f"Omega*_HA (Critical Index) = {Omega_star_HA_opt:.4f}")
-    print(f"tau_growth (Precursor Tau) = {tau_grow_opt:.2%} of residence time (tR)")
+    print(f"k_prec (Precipitation Rate Constant) = {k_prec_opt:.4e} mol/m2/min")
+    print(f"Omega*_HA (Critical Supersaturation) = {Omega_star_HA_opt:.4f}")
+    print(f"k_nuc (Nucleus Growth Rate Constant)  = {k_nuc_opt:.4e} min^-1")
     print("===============================================================\n")
 
     # --- 6. Plotting Two Systems Comparison ---
@@ -261,12 +266,12 @@ def main():
         f_pred = sim_cf(res_cf.x, cond)
         tracer = 1.0 - np.exp(-t_fine / tR_val)
         
-        ax.plot(t_obs / tR_val, f_obs / fin_m, 'ro', markersize=5, label='Experimental ($C_{\mathcal{F}}/C_{in}$)')
+        ax.plot(t_obs / tR_val, f_obs / fin_m, 'ro', markersize=5, label=r'Experimental ($C_{\mathcal{F}}/C_{in}$)')
         ax.plot(t_obs / tR_val, f_pred / fin_m, 'b-', linewidth=2, label=f'C+F Model ($k_{{ad}}$={k_F_ad_opt:.2f})')
         ax.plot(t_fine / tR_val, tracer, 'g--', linewidth=1.5, label='Ideal Non-Reactive Tracer')
         
         ax.set_xlabel('Dimensionless Time ($t / t_R$)', fontsize=10)
-        ax.set_ylabel('Normalized Fluoride ($C_{\mathcal{F}} / C_{in}$)', fontsize=10)
+        ax.set_ylabel(r'Normalized Fluoride ($C_{\mathcal{F}} / C_{in}$)', fontsize=10)
         ax.set_title(f"System 1 (C+F): Q={q_ml} mL/min, $F_{{in}}$={fin_m*1000*18.9984:.1f} ppm", fontsize=11)
         ax.set_ylim(-0.02, 1.05)
         ax.grid(True, linestyle='--', alpha=0.5)
@@ -283,21 +288,21 @@ def main():
         tR_val = V / cond['Q_L_min']
         
         t_fine = np.linspace(0, t_obs.max(), 300)
-        p_pred = sim_cp_smooth_activation(res_cp.x, cond)
+        p_pred = sim_cp_crit_length(res_cp.x, cond)
         tracer = 1.0 - np.exp(-t_fine / tR_val)
         
-        ax.plot(t_obs / tR_val, p_obs / pin_m, 'mo', markersize=5, label='Experimental ($C_P/C_{in}$)')
-        ax.plot(t_obs / tR_val, p_pred / pin_m, 'k-', linewidth=2, label=f'Precursor Activation Fit\n($\\tau_{{growth}}={tau_grow_opt:.2f} t_R$)')
+        ax.plot(t_obs / tR_val, p_obs / pin_m, 'mo', markersize=5, label=r'Experimental ($C_P/C_{in}$)')
+        ax.plot(t_obs / tR_val, p_pred / pin_m, 'k-', linewidth=2, label=r'Critical Length Growth Fit' + f'\n($\Omega^*={Omega_star_HA_opt:.2f}$)')
         ax.plot(t_fine / tR_val, tracer, 'g--', linewidth=1.5, label='Ideal Non-Reactive Tracer')
         
         ax.set_xlabel('Dimensionless Time ($t / t_R$)', fontsize=10)
-        ax.set_ylabel('Normalized Phosphate ($C_P / C_{in}$)', fontsize=10)
+        ax.set_ylabel(r'Normalized Phosphate ($C_P / C_{in}$)', fontsize=10)
         ax.set_title(f"System 2 (C+P): Q={q_ml} mL/min, $P_{{in}}$=1.0 mM", fontsize=11)
         ax.set_ylim(-0.02, 1.05)
         ax.grid(True, linestyle='--', alpha=0.5)
         ax.legend(fontsize=8.5, loc='upper left')
 
-    plt.suptitle('Isolated Single-Solute Systems: System 1 (Calcite + Fluoride Adsorption) & System 2 (Calcite + Phosphate HA Precipitation with Precursor Phase Activation)', fontsize=13, y=0.99)
+    plt.suptitle(r'Isolated Systems: System 1 (Calcite + Fluoride Adsorption) & System 2 (Calcite + Phosphate Critical Length $L_{\mathrm{crit}}$ Nucleation Growth)', fontsize=13, y=0.99)
     plt.tight_layout()
     plt.savefig('two_systems_comparison.png')
     print("Saved plot as 'two_systems_comparison.png'")
@@ -307,7 +312,7 @@ def main():
 
 This repository models isolated single-solute continuous flow-stirred tank reactor (CFSTR) dynamics:
 1. **System 1 (Calcite + Fluoride):** Decoupled fluoride adsorption and calcite dissolution.
-2. **System 2 (Calcite + Phosphate):** Decoupled continuous Hydroxyapatite (HA) surface precipitation with smooth Precursor Phase Transformation kinetics ($\tau_{{\text{{growth}}}}$).
+2. **System 2 (Calcite + Phosphate):** Classical Nucleation Theory (CNT) using Critical Nucleus Length ($L_{{\\text{{crit}}}}$) and Critical Supersaturation Ratio ($\Omega^*$).
 
 ## Two Systems Model Comparison
 
@@ -319,9 +324,9 @@ This repository models isolated single-solute continuous flow-stirred tank react
 | :--- | :--- | :---: | :---: | :--- |
 | **System 1 (C+F)** | Fluoride Adsorption Rate | $k_{{\\text{{F, ad}}}}$ | **{k_F_ad_opt:.4f}** | $\\text{{L}} \\cdot \\text{{mol}}^{{-1}} \\cdot \\text{{min}}^{{-1}}$ |
 | **System 1 (C+F)** | Fluoride Surface Capacity | $q_{{\\text{{max, F}}}}$ | **{q_max_F_opt:.4e}** | $\\text{{mol}} \\cdot \\text{{g}}^{{-1}}$ |
-| **System 2 (C+P)** | HA Surface Precipitation Rate | $k_{{\\text{{HA}}}}$ | **{k_HA_opt:.4e}** | $\\text{{mol}} \\cdot \\text{{m}}^{{-2}} \\cdot \\text{{min}}^{{-1}}$ |
+| **System 2 (C+P)** | Precipitation Rate Constant | $k_{{\\text{{prec}}}}$ | **{k_prec_opt:.4e}** | $\\text{{mol}} \\cdot \\text{{m}}^{{-2}} \\cdot \\text{{min}}^{{-1}}$ |
 | **System 2 (C+P)** | HA Critical Supersaturation | $\\Omega^*_{{\\text{{HA}}}}$ | **{Omega_star_HA_opt:.4f}** | — |
-| **System 2 (C+P)** | Precursor Phase Transformation Tau | $\\tau_{{\\text{{growth}}}}$ | **{tau_grow_opt:.2%} $t_R$** | — |
+| **System 2 (C+P)** | Nucleus Growth Rate Constant | $k_{{\\text{{nuc}}}}$ | **{k_nuc_opt:.4e}** | $\\text{{min}}^{{-1}}$ |
 """
     with open("README.md", "w") as f:
         f.write(readme_content)
