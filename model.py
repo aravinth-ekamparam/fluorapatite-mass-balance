@@ -4,8 +4,11 @@ import numpy as np
 import pandas as pd
 import matplotlib.pyplot as plt
 
-# --- 1. Load Experimental Data ---
+# --- 1. Load & Clean Experimental Data ---
 excel_file = 'CF_Exp data.xlsx'
+if not os.path.exists(excel_file):
+    raise FileNotFoundError(f"File '{excel_file}' not found in directory!")
+
 df_raw = pd.read_excel(excel_file)
 
 col_pairs = [(1, 2), (3, 4), (5, 6), (7, 8)]
@@ -16,8 +19,13 @@ for idx, (time_col_idx, f_col_idx) in enumerate(col_pairs):
     q_val = q_values[idx]
     fin_ppm = float(df_raw.iloc[0, time_col_idx])
     
-    data_sub = df_raw.iloc[3:, [time_col_idx, f_col_idx]].dropna()
+    data_sub = df_raw.iloc[3:, [time_col_idx, f_col_idx]].dropna().copy()
     data_sub.columns = ['Time_min', 'F_M']
+    
+    # FIX: Force explicit conversion to float64 to resolve numpy dtype('O') error
+    data_sub['Time_min'] = pd.to_numeric(data_sub['Time_min'], errors='coerce')
+    data_sub['F_M'] = pd.to_numeric(data_sub['F_M'], errors='coerce')
+    data_sub = data_sub.dropna()
     
     conditions.append({
         'id': idx + 1,
@@ -28,14 +36,14 @@ for idx, (time_col_idx, f_col_idx) in enumerate(col_pairs):
         'data': data_sub
     })
 
-# --- 2. Constants ---
-V = 0.058             # L
-S_calcite_0 = 4.0     # g/L
-SSA_calcite = 3.0     # m^2/g
+# --- 2. System Constants ---
+V = 0.058             # Reactor Volume (L)
+S_calcite_0 = 4.0     # Calcite Loading (g/L)
+SSA_calcite = 3.0     # Specific Surface Area (m^2/g)
 MW_calcite = 100.09   # g/mol
-k_diss_calcite = 10**(-5.90)
-Ksp_calcite = 10**(-8.48)
-dt = 5.0              # Fast integration step (min)
+k_diss_calcite = 10**(-5.90)  # mol/m^2/min
+Ksp_calcite = 10**(-8.48)     # Calcite Ksp
+dt = 5.0              # RK4 Integration Step (min)
 
 
 # --- 3. 2nd-Order RK4 Forward Simulator ---
@@ -44,11 +52,13 @@ def rk4_solve(q_L_min, fin_M, t_obs, log_k_ad, log_q_max):
     q_max_F = 10**log_q_max    # Capacity (mol/g)
     Q = q_L_min
     
-    t_end = t_obs.max()
+    # Ensure t_obs is a clean float64 numpy array
+    t_obs = np.asarray(t_obs, dtype=np.float64)
+    t_end = float(t_obs.max())
     steps = int(t_end / dt) + 1
-    t_grid = np.linspace(0, t_end, steps)
+    t_grid = np.linspace(0, t_end, steps, dtype=np.float64)
     
-    Y = np.zeros((steps, 5))
+    Y = np.zeros((steps, 5), dtype=np.float64)
     Y[0] = [0.0, 1.0e-5, 1.0e-5, 0.0, S_calcite_0]
     
     for i in range(steps - 1):
@@ -58,7 +68,6 @@ def rk4_solve(q_L_min, fin_M, t_obs, log_k_ad, log_q_max):
         IAP = C_Ca * C_CO3
         Omega = IAP / Ksp_calcite
         r_diss = S_calcite * SSA_calcite * k_diss_calcite * (1.0 - Omega) if (Omega < 1.0 and S_calcite > 0) else 0.0
-        # 2nd-order adsorption rate law
         r_ad_F = S_calcite * k_F_ad * C_F * max(0.0, q_max_F - q_F)
         k1 = np.array([(Q/V)*(fin_M-C_F)-r_ad_F, (Q/V)*(1e-5-C_Ca)+r_diss, (Q/V)*(1e-5-C_CO3)+r_diss, r_ad_F/max(1e-6, S_calcite), -r_diss*MW_calcite/1000.0])
         
@@ -104,11 +113,10 @@ def log_posterior(theta):
     total_log_like = 0.0
     
     for cond in conditions:
-        t_obs = cond['data']['Time_min'].values
-        f_obs = cond['data']['F_M'].values
+        t_obs = cond['data']['Time_min'].values.astype(np.float64)
+        f_obs = cond['data']['F_M'].values.astype(np.float64)
         f_pred = rk4_solve(cond['Q_L_min'], cond['Fin_M'], t_obs, log_k_ad, log_q_max)
         
-        # Normalized error term across conditions
         norm_res = (f_obs - f_pred) / cond['Fin_M']
         total_log_like += -0.5 * np.sum((norm_res / sigma)**2) - len(f_obs) * np.log(sigma * np.sqrt(2 * np.pi))
         
@@ -120,11 +128,12 @@ def run_multi_condition_mcmc(n_samples=1000):
     print("Running Multi-Condition Bayesian MCMC Sampling...")
     start_t = time.time()
     
-    current_theta = np.array([-0.86, -4.36, -1.8])  # Starting guess from global optimization
+    current_theta = np.array([-0.86, -4.36, -1.8])
     current_log_post = log_posterior(current_theta)
     
     samples = []
     proposal_std = np.array([0.015, 0.015, 0.015])
+    accepted = 0
     
     for i in range(n_samples):
         proposal = current_theta + np.random.normal(0, proposal_std)
@@ -133,19 +142,20 @@ def run_multi_condition_mcmc(n_samples=1000):
         if np.log(np.random.rand()) < (prop_log_post - current_log_post):
             current_theta = proposal
             current_log_post = prop_log_post
+            accepted += 1
             
         samples.append(current_theta)
         
-    chain = np.array(samples)[int(n_samples * 0.3):]  # Apply 30% burn-in
+    chain = np.array(samples)[int(n_samples * 0.3):]
     
     k_ad_mcmc = 10**chain[:, 0]
     q_max_mcmc = 10**chain[:, 1]
     
-    print(f"\nCompleted in {time.time() - start_t:.1f} seconds.")
-    print("=== BAYESIAN POSTERIOR ESTIMATES (95% Credible Intervals) ===")
+    print(f"\nCompleted in {time.time() - start_t:.1f} seconds (Acceptance Rate: {accepted/n_samples:.1%}).")
+    print("================ POSTERIOR PARAMETER ESTIMATES (95% CI) ================")
     print(f"k_F_ad  : {np.median(k_ad_mcmc):.3f} L/(mol*min)  (95% CI: [{np.percentile(k_ad_mcmc, 2.5):.3f}, {np.percentile(k_ad_mcmc, 97.5):.3f}])")
     print(f"q_max_F : {np.median(q_max_mcmc):.3e} mol/g       (95% CI: [{np.percentile(q_max_mcmc, 2.5):.3e}, {np.percentile(q_max_mcmc, 97.5):.3e}])")
-    print("=============================================================\n")
+    print("========================================================================\n")
 
 if __name__ == "__main__":
     run_multi_condition_mcmc(n_samples=1000)
