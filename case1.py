@@ -146,8 +146,8 @@ def log_posterior(theta, exp_data, config):
 if __name__ == "__main__":
     ndim = 3
     nwalkers = 12
-    n_burnin = 100
-    n_steps = 300
+    n_burnin = 200
+    n_steps = 400
     
     # Initialize walkers around prior center
     init_pos = np.array([-5.70, -5.90, -5.50]) + 0.05 * np.random.randn(nwalkers, ndim)
