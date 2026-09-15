@@ -1,9 +1,14 @@
+<<<<<<< HEAD
+=======
 import os
 import numpy as np
 import pandas as pd
 import matplotlib.pyplot as plt
 from scipy.optimize import minimize
+>>>>>>> e6dee93b0fedf7d1b7343d392e537ba47c285a0c
 
+<<<<<<< HEAD
+=======
 # --- 1. Load Experimental Datasets ---
 excel_file = 'CF_Exp data.xlsx'
 df_raw = pd.read_excel(excel_file)
@@ -334,3 +339,4 @@ This repository models isolated single-solute continuous flow-stirred tank react
 
 if __name__ == "__main__":
     main()
+>>>>>>> e6dee93b0fedf7d1b7343d392e537ba47c285a0c
