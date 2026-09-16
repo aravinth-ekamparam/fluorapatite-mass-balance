@@ -3,7 +3,6 @@ import emcee
 import matplotlib.pyplot as plt
 import numpy as np
 import pandas as pd
-from scipy.integrate import solve_ivp
 
 # ==============================================================================
 # 1. EXPERIMENTAL CONDITIONS FROM EXCEL (CF_Exp data.xlsx)
@@ -33,164 +32,162 @@ excel_file = "CF_Exp data.xlsx"
 df = pd.read_excel(excel_file, header=None)
 
 # ==============================================================================
-# 2. CFSTR BASE PARAMETERS (Thesis Section 5.2)
+# 2. CFSTR BASE PARAMETERS (Thesis Section 5.2 & Paper ES&T Eng. 2024)
 # ==============================================================================
 BASE_CONFIG = {
     "V": 0.058,  # Volume (L) [58 mL]
-    "Pin": 1.0e-3,  # Influent PO4 (M) [1 mM]
+    "Pin": 1.0e-3,  # Influent PO4 (M) [1.0 mM]
     "Ccal_0": 4.0,  # Calcite loading (g/L)
-    "SSA_cal": 3.0,  # Calcite SSA (m2/g)
+    "SSA_cal": 3.0,  # Calcite specific surface area (m2/g)
     "MW_cal": 100.0869,  # CaCO3 MW (g/mol)
     "Ksp_cal": 10 ** (-8.48),
-    # Hydroxyapatite (HA) Properties (Thesis Chapter 5, Table 5.3)
+    # Hydroxyapatite (HA) Properties (Thesis Table 5.3)
     "MW_HA": 502.31,  # g/mol
     "rho_HA": 3100.0,  # kg/m3
     "sigma_HA": 0.087,  # Surface free energy (J/m2)
     "a_HA": 0.8,
     "b_HA": 0.047,
-    "Ksp3": 10 ** (-58.333),  # Ca5(PO4)3OH Ksp (Thesis Eq. 5.15 & 5.27)
+    "Ksp3": 10 ** (-58.333),  # Ca5(PO4)3OH Ksp
     "Np_HA": 8.62e6,  # Nucleated particles (Section 5.3.9.1)
-    # Speciation at pH 7.5
+    # Speciation & Mass Transfer
     "gamma_Ca": 0.87,
     "gamma_PO4": 0.73,
     "gamma_CO3": 0.90,
     "alpha0": 0.0967,
-    "kgl": 10 ** (-2.145),  # min^-1
+    "kgl": 10 ** (-4.06),  # min^-1 (ES&T Eng. 2024)
     "CO3_sat": 10 ** (-5.0),
-    "OH_act": 10 ** (-6.50),  # {OH-} at pH 7.5
+    "OH_act": 10 ** (-6.50),  # pH 7.5
 }
 
 
 # ==============================================================================
-# 3. CFSTR GOVERNING EQUATIONS
+# 3. EXPLICIT EULER FORWARD CFSTR SIMULATOR (Thesis Appendix 5D & Excel Model)
 # ==============================================================================
-def cfstr_cp_odes(t, y, params, config):
-  P, Ca, CO3, Ccal, Ps, CHA = y
-
-  P = max(0.0, P)
-  Ca = max(0.0, Ca)
-  CO3 = max(0.0, CO3)
-  Ccal = max(0.0, Ccal)
-  Ps = max(0.0, Ps)
-  CHA = max(0.0, CHA)
+def simulate_cp_euler(params, config, t_max):
+  dt = 1.0  # Time step h = 1.0 min (matches thesis Appendix 5D)
+  n_steps = int(t_max / dt) + 1
 
   Q = config["Q"]
+  V = config["V"]
   Pin = config["Pin"]
+  Ccal = config["Ccal_0"]
 
   kP = 10 ** params["log10_kP"]  # min^-1
   kHA = 10 ** params["log10_kHA"]  # umol/(m2*min)
   Omega_star_HA = params["Omega_star_HA"]
-  kcal = 10 ** params["log10_kcal"]  # mol/(m2*min)
+  kcal = 10 ** (-5.90)  # Invariant calcite dissolution
 
-  # 1. Freundlich Adsorption on Calcite (Thesis Eq. 5.40)
-  P_uM = P * 1e6
-  Ps_star = 0.084 * (P_uM**0.31)
-  dPs_dt = kP * (Ps_star - Ps)
+  v_HA = config["MW_HA"] / (config["rho_HA"] * 1000.0)  # m3/mol
+  geom = 1.0 + (1.0 / config["a_HA"]) + (1.0 / config["b_HA"])
 
-  # 2. Calcite Dissolution
-  IAP_cal = (config["gamma_Ca"] * Ca) * (config["gamma_CO3"] * CO3)
-  f_G_cal = (IAP_cal / config["Ksp_cal"]) - 1.0
-  r_diss_cal = -kcal * config["SSA_cal"] * Ccal * f_G_cal
+  # Initial conditions (Thesis Section 5.2.5)
+  P = 0.0
+  Ca = 10 ** (-3.69)
+  CO3 = 10 ** (-5.0)
+  Ps = 0.0
+  L_HA = 0.0
+  nucleated = False
 
-  # 3. Hydroxyapatite Precipitation (Thesis Eq. 5.15, 5.27)
-  # Free PO4^3- fraction at pH 7.5 is ~ 9.4e-6
-  PO4_act = config["gamma_PO4"] * P * 9.4e-6
-  Ca_act = config["gamma_Ca"] * Ca
+  P_out = np.zeros(n_steps)
+  t_out = np.arange(n_steps) * dt
 
-  IAP_HA = (Ca_act**5) * (PO4_act**3) * config["OH_act"]
+  for step in range(n_steps):
+    P_out[step] = P
 
-  # Driving force (Thesis Eq. 5.27)
-  f_G_HA = max(0.0, (IAP_HA / config["Ksp3"]) - 1.0)
+    # 1. Freundlich Adsorption on Calcite (Thesis Eq. 5.40)
+    P_uM = max(0.0, P * 1e6)
+    Ps_star = 0.084 * (P_uM**0.31)
+    dPs_dt = kP * (Ps_star - Ps)
+    Ps = max(0.0, Ps + dPs_dt * dt)
 
-  # Mean ionic saturation state for nucleation threshold
-  Omega_mean = (IAP_HA / config["Ksp3"]) ** (1.0 / 9.0) if IAP_HA > 0 else 0.0
+    # 2. Calcite Dissolution
+    IAP_cal = (config["gamma_Ca"] * Ca) * (config["gamma_CO3"] * CO3)
+    f_G_cal = (IAP_cal / config["Ksp_cal"]) - 1.0
+    r_diss_cal = -kcal * config["SSA_cal"] * Ccal * f_G_cal  # mol/(L*min)
 
-  if Omega_mean >= Omega_star_HA or CHA > 1e-7:
-    # Dynamic surface area of growing particles
-    v_HA = config["MW_HA"] / (config["rho_HA"] * 1000.0)
-    geom = 1.0 + (1.0 / config["a_HA"]) + (1.0 / config["b_HA"])
-    ln_om = np.log(max(1.001, Omega_star_HA))
-    Lc = geom * (v_HA * config["sigma_HA"]) / (8.314 * 298.15 * ln_om)
+    # 3. Hydroxyapatite Saturation & Precipitation
+    PO4_act = config["gamma_PO4"] * P * 9.4e-6
+    Ca_act = config["gamma_Ca"] * Ca
+    IAP_HA = (Ca_act**5) * (PO4_act**3) * config["OH_act"]
 
-    # Effective mass & crystal size
-    CHA_eff = max(
-        CHA,
-        1000.0
-        * config["Np_HA"]
-        * config["rho_HA"]
-        * config["a_HA"]
-        * config["b_HA"]
-        * (Lc**3)
-        / config["V"],
+    # Mean ionic saturation state
+    Omega_HA = (IAP_HA / config["Ksp3"]) ** (1.0 / 9.0) if IAP_HA > 0 else 0.0
+    f_G_HA = max(0.0, Omega_HA - 1.0)
+
+    # Nucleation burst trigger (CNT)
+    if (not nucleated) and (Omega_HA >= Omega_star_HA):
+      nucleated = True
+      ln_om = np.log(max(1.001, Omega_star_HA))
+      Lc = geom * (v_HA * config["sigma_HA"]) / (8.314 * 298.15 * ln_om)
+      L_HA = Lc
+
+    # Crystal growth and precipitation
+    if nucleated and (Omega_HA > 1.0):
+      # Linear face growth along L (m/min)
+      growth_coeff = (
+          2.0 * (config["a_HA"] * config["b_HA"] + config["a_HA"] + config["b_HA"])
+      ) / (3000.0 * config["rho_HA"] * config["a_HA"] * config["b_HA"])
+      dL_dt = kHA * growth_coeff * f_G_HA * config["MW_HA"] * 1e-6
+      L_HA += dL_dt * dt
+
+      # Solid mass concentration (g/L) and dynamic SSA (m2/g)
+      CHA = (
+          1000.0
+          * config["Np_HA"]
+          * config["rho_HA"]
+          * config["a_HA"]
+          * config["b_HA"]
+          * (L_HA**3)
+          / V
+      )
+      SSA_HA = (
+          2.0
+          * (config["a_HA"] * config["b_HA"] + config["a_HA"] + config["b_HA"])
+      ) / (
+          1000.0
+          * config["rho_HA"]
+          * config["a_HA"]
+          * config["b_HA"]
+          * max(1e-9, L_HA)
+      )
+
+      # Volumetric precipitation rate: mol/(L*min)
+      r_precip_HA = kHA * SSA_HA * CHA * f_G_HA * 1e-6
+    else:
+      r_precip_HA = 0.0
+
+    # 4. Fluid Mass Balances (Euler Step)
+    dP_dt = (
+        (Q / V) * (Pin - P) - Ccal * dPs_dt * 1e-6 - 3.0 * r_precip_HA
     )
-    L = (
-        CHA_eff
-        * config["V"]
-        / (
-            1000.0
-            * config["Np_HA"]
-            * config["rho_HA"]
-            * config["a_HA"]
-            * config["b_HA"]
-        )
-    ) ** (1.0 / 3.0)
-    SSA_HA = (
-        2.0 * (config["a_HA"] * config["b_HA"] + config["a_HA"] + config["b_HA"])
-    ) / (
-        1000.0
-        * config["rho_HA"]
-        * config["a_HA"]
-        * config["b_HA"]
-        * max(1e-9, L)
-    )
+    dCa_dt = -(Q / V) * Ca + r_diss_cal - 5.0 * r_precip_HA
+    r_gas = config["kgl"] * ((config["CO3_sat"] / config["alpha0"]) - CO3)
+    dCO3_dt = -(Q / V) * CO3 + r_diss_cal + r_gas
 
-    # Precipitation rate (mol/(L*min))
-    r_precip_HA = max(0.0, kHA * SSA_HA * CHA_eff * f_G_HA * 1e-6)
-  else:
-    r_precip_HA = 0.0
+    P = max(0.0, P + dP_dt * dt)
+    Ca = max(0.0, Ca + dCa_dt * dt)
+    CO3 = max(0.0, CO3 + dCO3_dt * dt)
 
-  # 4. Fluid Mass Balances (Thesis Eq. 5.37-5.42)
-  dP_dt = (
-      (Q / config["V"]) * (Pin - P)
-      - Ccal * dPs_dt * 1e-6
-      - 3.0 * r_precip_HA
-  )
-  dCa_dt = -(Q / config["V"]) * Ca + r_diss_cal - 5.0 * r_precip_HA
-  r_gas = config["kgl"] * ((config["CO3_sat"] / config["alpha0"]) - CO3)
-  dCO3_dt = -(Q / config["V"]) * CO3 + r_diss_cal + r_gas
-  dCcal_dt = -r_diss_cal * config["MW_cal"]
-  dCHA_dt = r_precip_HA * config["MW_HA"]
-
-  return [dP_dt, dCa_dt, dCO3_dt, dCcal_dt, dPs_dt, dCHA_dt]
+  return t_out, P_out
 
 
 def run_forward_model(params, time_points, config):
-  y0 = [0.0, 10 ** (-3.69), 10 ** (-5.0), config["Ccal_0"], 0.0, 0.0]
-
-  sol = solve_ivp(
-      fun=lambda t, y: cfstr_cp_odes(t, y, params, config),
-      t_span=[0.0, max(time_points)],
-      y0=y0,
-      t_eval=time_points,
-      method="BDF",
-      rtol=1e-4,
-      atol=1e-7,
-  )
-  if not sol.success:
+  t_sim, P_sim = simulate_cp_euler(params, config, max(time_points))
+  if np.any(np.isnan(P_sim)) or np.any(np.isinf(P_sim)):
     return None
-  return sol.y[0]
+  return np.interp(time_points, t_sim, P_sim)
 
 
 # ==============================================================================
-# 4. BAYESIAN INFERENCE (PRIORS & LIKELIHOOD)
+# 4. BAYESIAN LIKELIHOOD & PRIORS
 # ==============================================================================
 def log_prior(theta):
   log10_kP, log10_kHA, Omega_star_HA, log_sigma_P = theta
 
-  # Priors centered on Thesis Table 5.5
-  if not (-7.5 <= log10_kP <= -3.0):
+  # Priors covering Thesis Table 5.5 and Paper Table 1 ranges
+  if not (-7.0 <= log10_kP <= -3.0):
     return -np.inf
-  if not (-18.0 <= log10_kHA <= -13.0):
+  if not (-17.5 <= log10_kHA <= -12.0):
     return -np.inf
   if not (1.05 <= Omega_star_HA <= 1.45):
     return -np.inf
@@ -208,11 +205,10 @@ def log_likelihood(theta, exp_data, config):
       "log10_kP": log10_kP,
       "log10_kHA": log10_kHA,
       "Omega_star_HA": Omega_star_HA,
-      "log10_kcal": -5.90,
   }
 
   P_sim = run_forward_model(params, exp_data["t_min"], config)
-  if P_sim is None or np.any(np.isnan(P_sim)):
+  if P_sim is None:
     return -np.inf
 
   res = exp_data["P_meas"] - P_sim
@@ -237,14 +233,14 @@ def log_posterior(theta, exp_data, config):
 
 
 # ==============================================================================
-# 5. EXECUTION ACROSS ALL THREE FLOW RATES
+# 5. EXECUTION ACROSS ALL 3 FLOW RATES
 # ==============================================================================
 if __name__ == "__main__":
   results = {}
   ndim = 4
   nwalkers = 16
   n_burnin = 150
-  n_steps = 350
+  n_steps = 300
 
   fig_all, axes = plt.subplots(1, 3, figsize=(16, 4.5), sharey=False)
 
@@ -266,8 +262,8 @@ if __name__ == "__main__":
 
     exp_data = {"t_min": t_data, "P_meas": p_data}
 
-    # Initial positions centered around Thesis Table 5.5
-    init_pos = np.array([-5.20, -15.50, 1.16, -4.50]) + 0.05 * np.random.randn(
+    # Initial positions centered around thesis Table 5.5
+    init_pos = np.array([-5.0, -15.5, 1.16, -4.5]) + 0.05 * np.random.randn(
         nwalkers, ndim
     )
 
@@ -305,7 +301,7 @@ if __name__ == "__main__":
     fig_c.savefig(f"case2_corner_{cond['id']}.png", dpi=300)
     plt.close(fig_c)
 
-    # Subplot model fit
+    # Plot model fit on 3-panel figure
     ax = axes[idx]
     t_fine = np.linspace(0, max(t_data), 150)
     trajectories = []
@@ -315,7 +311,6 @@ if __name__ == "__main__":
           "log10_kP": th[0],
           "log10_kHA": th[1],
           "Omega_star_HA": th[2],
-          "log10_kcal": -5.90,
       }
       p_sim = run_forward_model(p_dict, t_fine, cfg)
       if p_sim is not None:
