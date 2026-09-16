@@ -41,15 +41,9 @@ BASE_CONFIG = {
     "SSA_cal": 3.0,  # Calcite SSA (m2/g)
     "MW_cal": 100.0869,  # CaCO3 MW (g/mol)
     "Ksp_cal": 10 ** (-8.48),
-    # Hydroxyapatite (HA) Physical Properties (Thesis Table 5.3)
     "MW_HA": 502.31,  # g/mol
-    "rho_HA": 3100.0,  # kg/m3
-    "sigma_HA": 0.087,  # Surface free energy (J/m2)
-    "a_HA": 0.8,
-    "b_HA": 0.047,
     "Ksp3": 10 ** (-58.333),  # Ca5(PO4)3OH Ksp
-    "Np_HA": 8.62e6,  # Nucleated particles (Section 5.3.9.1)
-    # Speciation & Activities
+    # Activities & Speciation at pH ~ 7.5
     "gamma_Ca": 0.87,
     "gamma_PO4": 0.73,
     "gamma_CO3": 0.90,
@@ -57,14 +51,15 @@ BASE_CONFIG = {
     "kgl": 10 ** (-4.06),  # min^-1
     "CO3_sat": 10 ** (-5.0),
     "OH_act": 10 ** (-6.50),  # pH 7.5
+    "kcal": 10 ** (-5.90),  # Calcite dissolution rate
 }
 
 
 # ==============================================================================
-# 3. PRECIPITATION-ONLY CFSTR SIMULATOR (Euler Forward, h = 1.0 min)
+# 3. PRECIPITATION-ONLY EULER SIMULATOR
 # ==============================================================================
-def simulate_cp_euler(params, config, t_max):
-  dt = 1.0  # min
+def simulate_cp_precip(params, config, t_max):
+  dt = 1.0  # Step size h = 1.0 min
   n_steps = int(t_max / dt) + 1
 
   Q = config["Q"]
@@ -72,20 +67,15 @@ def simulate_cp_euler(params, config, t_max):
   Pin = config["Pin"]
   Ccal = config["Ccal_0"]
 
-  # log10_kHA represents effective surface precipitation rate in umol/(m2*min)
-  kHA_eff = 10 ** params["log10_kHA"]
+  # Rate parameters
+  k_precip = 10 ** params["log10_kprecip"]  # Effective rate in min^-1
   Omega_star_HA = params["Omega_star_HA"]
-  kcal = 10 ** (-5.90)
+  kcal = config["kcal"]
 
-  v_HA = config["MW_HA"] / (config["rho_HA"] * 1000.0)  # m3/mol
-  geom = 1.0 + (1.0 / config["a_HA"]) + (1.0 / config["b_HA"])
-
-  # Initial Conditions
+  # State variables
   P = 0.0
   Ca = 10 ** (-3.69)
   CO3 = 10 ** (-5.0)
-  CHA = 0.0
-  L_HA = 0.0
   nucleated = False
 
   P_out = np.zeros(n_steps)
@@ -107,57 +97,17 @@ def simulate_cp_euler(params, config, t_max):
     Omega_HA = (IAP_HA / config["Ksp3"]) ** (1.0 / 9.0) if IAP_HA > 0 else 0.0
     f_G_HA = max(0.0, Omega_HA - 1.0)
 
-    # 3. Nucleation Trigger
+    # 3. Nucleation Barrier Check
     if (not nucleated) and (Omega_HA >= Omega_star_HA):
       nucleated = True
-      ln_om = np.log(max(1.001, Omega_star_HA))
-      Lc = geom * (v_HA * config["sigma_HA"]) / (8.314 * 298.15 * ln_om)
-      L_HA = Lc
-      CHA = (
-          1000.0
-          * config["Np_HA"]
-          * config["rho_HA"]
-          * config["a_HA"]
-          * config["b_HA"]
-          * (L_HA**3)
-          / V
-      )
 
-    # 4. Crystal Growth
+    # 4. Precipitation Sink (Continuous Crystal Growth Once Triggered)
     if nucleated and (f_G_HA > 0.0):
-      # Specific surface area evolves dynamically with particle length L
-      SSA_HA = (
-          2.0
-          * (config["a_HA"] * config["b_HA"] + config["a_HA"] + config["b_HA"])
-      ) / (
-          1000.0
-          * config["rho_HA"]
-          * config["a_HA"]
-          * config["b_HA"]
-          * max(1e-9, L_HA)
-      )
-
-      # Precipitation rate: mol/(L*min)
-      r_precip_HA = kHA_eff * SSA_HA * max(1e-5, CHA) * f_G_HA * 1e-6
-
-      # Mass and size increment
-      dCHA_dt = r_precip_HA * config["MW_HA"]
-      CHA += dCHA_dt * dt
-      L_HA = (
-          CHA
-          * V
-          / (
-              1000.0
-              * config["Np_HA"]
-              * config["rho_HA"]
-              * config["a_HA"]
-              * config["b_HA"]
-          )
-      ) ** (1.0 / 3.0)
+      r_precip_HA = k_precip * f_G_HA * P  # mol/(L*min)
     else:
       r_precip_HA = 0.0
 
-    # 5. Fluid Mass Balances (Adsorption is MASKED: dPs_dt = 0)
+    # 5. Liquid Mass Balances (Adsorption is MASKED)
     dP_dt = (Q / V) * (Pin - P) - 3.0 * r_precip_HA
     dCa_dt = -(Q / V) * Ca + r_diss_cal - 5.0 * r_precip_HA
     r_gas = config["kgl"] * ((config["CO3_sat"] / config["alpha0"]) - CO3)
@@ -171,42 +121,33 @@ def simulate_cp_euler(params, config, t_max):
 
 
 def run_forward_model(params, time_points, config):
-  t_sim, P_sim = simulate_cp_euler(params, config, max(time_points))
-  if np.any(np.isnan(P_sim)) or np.any(np.isinf(P_sim)):
-    return None
+  t_sim, P_sim = simulate_cp_precip(params, config, max(time_points))
   return np.interp(time_points, t_sim, P_sim)
 
 
 # ==============================================================================
-# 4. BAYESIAN INFERENCE (PRECIPITATION ONLY)
+# 4. BAYESIAN LIKELIHOOD & PRIORS
 # ==============================================================================
-# Parameter vector: theta = [log10_kHA, Omega_star_HA, log_sigma_P]
-
-
 def log_prior(theta):
-  log10_kHA, Omega_star_HA, log_sigma_P = theta
+  log10_kprecip, Omega_star_HA, log_sigma_P = theta
 
-  # Priors on effective rate constant and nucleation barrier
-  if not (-3.0 <= log10_kHA <= 3.0):
+  # Priors on effective rate constant and nucleation threshold
+  if not (-4.0 <= log10_kprecip <= 0.0):
     return -np.inf
-  if not (1.02 <= Omega_star_HA <= 1.40):
+  if not (1.01 <= Omega_star_HA <= 1.25):
     return -np.inf
   if not (-6.0 <= log_sigma_P <= -2.0):
     return -np.inf
-
   return 0.0
 
 
 def log_likelihood(theta, exp_data, config):
-  log10_kHA, Omega_star_HA, log_sigma_P = theta
+  log10_kprecip, Omega_star_HA, log_sigma_P = theta
   sigma_P = 10**log_sigma_P
 
-  params = {"log10_kHA": log10_kHA, "Omega_star_HA": Omega_star_HA}
+  params = {"log10_kprecip": log10_kprecip, "Omega_star_HA": Omega_star_HA}
 
   P_sim = run_forward_model(params, exp_data["t_min"], config)
-  if P_sim is None:
-    return -np.inf
-
   res = exp_data["P_meas"] - P_sim
   n = len(exp_data["t_min"])
   ll = -0.5 * np.sum((res / sigma_P) ** 2) - n * np.log(
@@ -258,8 +199,8 @@ if __name__ == "__main__":
 
     exp_data = {"t_min": t_data, "P_meas": p_data}
 
-    # Initial walker positions
-    init_pos = np.array([0.0, 1.16, -4.5]) + 0.05 * np.random.randn(
+    # Initialize walkers around expected values
+    init_pos = np.array([-2.0, 1.10, -4.5]) + 0.05 * np.random.randn(
         nwalkers, ndim
     )
 
@@ -277,7 +218,7 @@ if __name__ == "__main__":
     }
 
     labels = [
-        r"$\log_{10}(k_{\mathrm{HA,eff}})$",
+        r"$\log_{10}(k_{\mathrm{precip}})$",
         r"$\Omega^*_{\mathrm{HA}}$",
         r"$\log_{10}(\sigma_P)$",
     ]
@@ -297,16 +238,15 @@ if __name__ == "__main__":
     fig_c.savefig(f"case2_corner_precip_{cond['id']}.png", dpi=300)
     plt.close(fig_c)
 
-    # Subplot model fit
+    # Plot model fit on 3-panel figure
     ax = axes[idx]
     t_fine = np.linspace(0, max(t_data), 150)
     trajectories = []
     for s_idx in np.random.randint(len(samples), size=60):
       th = samples[s_idx]
-      p_dict = {"log10_kHA": th[0], "Omega_star_HA": th[1]}
+      p_dict = {"log10_kprecip": th[0], "Omega_star_HA": th[1]}
       p_sim = run_forward_model(p_dict, t_fine, cfg)
-      if p_sim is not None:
-        trajectories.append(p_sim)
+      trajectories.append(p_sim)
     trajectories = np.array(trajectories)
 
     p_low = np.percentile(trajectories, 2.5, axis=0) * 1e3
